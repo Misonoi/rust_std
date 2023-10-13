@@ -170,3 +170,124 @@ pub fn replace(&self, val: T) -> T {
 ```
 
 通过交换内部的指针来实现内部可变性， 因为`replace`并不要求`mut`, 所以可以实现
+
+## `RefCell`
+
+用于给未实现`Copy`的类型实现内部可变性
+
+```rust
+pub struct RefCell<T> {
+    value: UnsafeCell<T>,
+    state: Cell<RefState>,
+    _marker: PhantomData<UnsafeCell<T>>,
+}
+```
+
+核心方法如下：
+
+```rust
+impl<T> RefCell<T> {
+    pub fn new(value: T) -> Self {
+        Self {
+            value: UnsafeCell::new(value),
+            state: Cell::new(RefState::Unshared),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T> RefCell<T> {
+    pub fn borrow(&self) -> Option<Ref<'_, T>> {
+        match self.state.get() {
+            RefState::Unshared => {
+                self.state.set(RefState::Shared(1));
+
+                Some(Ref {
+                    ref_cell: self,
+                })
+            }
+            RefState::Shared(n) => {
+                self.state.set(RefState::Shared(n + 1));
+
+                Some(Ref {
+                    ref_cell: self,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    pub fn borrow_mut(&self) -> Option<RefMut<'_, T>> {
+        if let RefState::Unshared = self.state.get() {
+            self.state.set(RefState::Exclusive);
+
+            Some(RefMut {
+                refcell: self,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+pub struct Ref<'refcell, T> {
+    ref_cell: &'refcell RefCell<T>,
+}
+
+impl<T> std::ops::Deref for Ref<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.ref_cell.value.get() }
+    }
+}
+
+impl<T> Drop for Ref<'_, T> {
+    fn drop(&mut self) {
+        match self.ref_cell.state.get() {
+            RefState::Exclusive | RefState::Unshared => unreachable!(),
+            RefState::Shared(1) => {
+                self.ref_cell.state.set(RefState::Unshared);
+            }
+            RefState::Shared(n) => {
+                self.ref_cell.state.set(RefState::Shared(n - 1));
+            }
+        }
+    }
+}
+
+pub struct RefMut<'refcell, T> {
+    refcell: &'refcell RefCell<T>,
+}
+
+impl<T> std::ops::Deref for RefMut<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.refcell.value.get() }
+    }
+}
+
+impl<T> std::ops::DerefMut for RefMut<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { &mut *self.refcell.value.get() }
+    }
+}
+
+impl<T> Drop for RefMut<'_, T> {
+    fn drop(&mut self) {
+        match self.refcell.state.get() {
+            RefState::Shared(_) | RefState::Unshared => unreachable!(),
+            RefState::Exclusive => {
+                self.refcell.state.set(RefState::Unshared);
+            }
+        }
+    }
+}
+```
+
+`borrow`和`borrow_mut`用于向外部提供共享引用和可变引用。 值得注意的是， 需要声明结构体为`mut`的条件是， 结构体的方法中有`&mut self`, 或是直接修改结构体的字段。 
+
+共享引用可以有很多， 但是只有没有共享引用的时候才可以借出可变引用
+
+当`drop`时要修改引用计数， 但是又不能直接`drop RefCell`, 于是考虑使用`Ref`和`RefMut`进行包装。 
+
+>任何计算机科学中的问题， 都可以通过添加一个抽象层来解决。

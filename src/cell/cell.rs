@@ -63,7 +63,7 @@ impl<T> Cell<T> {
         self.value.into_inner()
     }
 
-    pub fn set(&self, val: T) {
+    pub fn set(&self, val:  T) {
         let old = self.replace(val);
         drop(old);
     }
